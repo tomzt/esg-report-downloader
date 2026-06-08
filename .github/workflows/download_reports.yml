@@ -1,0 +1,65 @@
+name: Download ESG Company Reports
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch_start:
+        description: "Company index start (0-based)"
+        required: false
+        default: "0"
+      batch_end:
+        description: "Company index end (exclusive)"
+        required: false
+        default: "264"
+      concurrency:
+        description: "Parallel browsers"
+        required: false
+        default: "3"
+  schedule:
+    - cron: "0 2 * * *"
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Restore download log from previous run (cache)
+        uses: actions/cache@v4
+        with:
+          path: download_log.csv
+          key: download-log-${{ github.run_number }}
+          restore-keys: |
+            download-log-
+
+      - name: Run downloader
+        env:
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          BATCH_START: ${{ github.event.inputs.batch_start || '0' }}
+          BATCH_END: ${{ github.event.inputs.batch_end || '264' }}
+          CONCURRENCY: ${{ github.event.inputs.concurrency || '3' }}
+          EXCEL_PATH: "SET_ESG_Ratings_2568_264บริษัท.xlsx"
+        run: python download_reports.py
+
+      - name: Upload log as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: download-log-${{ github.run_number }}
+          path: download_log.csv
+          retention-days: 30
