@@ -72,7 +72,7 @@ def get_or_create_folder(service, name: str, parent_id: str) -> str:
 
 
 def upload_to_drive(service, local_path: str, filename: str, folder_id: str):
-    media = MediaFileUpload(local_path, resumable=True)
+    media = MediaFileUpload(local_path, resumable=False)
     meta  = {"name": filename, "parents": [folder_id]}
     service.files().create(body=meta, media_body=media, fields="id").execute()
     print(f"  â Uploaded {filename} to Drive")
