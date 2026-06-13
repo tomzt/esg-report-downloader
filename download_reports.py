@@ -25,7 +25,7 @@ from googleapiclient.http import MediaFileUpload
 import json
 
 # ââ Config âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-XLSX_PATH = "SET_ESG_Ratings_2568_264à¸à¸£à¸´à¸©à¸±à¸.xlsx"
+XLSX_PATH = "companies.xlsx"
 LOG_FILE  = "download_log.csv"
 TMP_DIR   = Path("tmp_downloads")
 GDRIVE_ROOT_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "")

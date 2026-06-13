@@ -55,7 +55,7 @@ jobs:
           BATCH_START: ${{ github.event.inputs.batch_start || '0' }}
           BATCH_END: ${{ github.event.inputs.batch_end || '264' }}
           CONCURRENCY: ${{ github.event.inputs.concurrency || '3' }}
-          EXCEL_PATH: "SET_ESG_Ratings_2568_264บริษัท.xlsx"
+          EXCEL_PATH: "companies.xlsx"
         run: python download_reports.py
 
       - name: Upload log as artifact
