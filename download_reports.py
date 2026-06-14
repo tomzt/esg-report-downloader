@@ -135,6 +135,14 @@ async def download_sec_one_report(page, symbol: str, out_dir: Path, lang: str = 
         await page.goto(url, wait_until="networkidle", timeout=60000)
         await page.wait_for_timeout(6000)
 
+        # Call SET API directly for 56-1 One Report
+        api_url = f"https://www.set.or.th/api/set/company/{symbol}/report/one?lang={lang_code}"
+        api_resp = await page.request.get(api_url)
+        if not api_resp.ok:
+            return False, "", f"API {api_resp.status} for {api_url[-60:]}"
+        api_data = await api_resp.json()
+        return False, "", f"API OK: {str(api_data)[:400]}"
+
         pdf_link = None
 
         # Strategy 1: href or text contains 56-1 / one-report keywords
