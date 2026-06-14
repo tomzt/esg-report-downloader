@@ -127,11 +127,11 @@ async def download_sec_one_report(page, symbol: str, out_dir: Path, lang: str = 
     Returns (success, filename, note)
     """
     lang_code = "th" if lang == "th" else "en"
-    url = f"https://www.set.or.th/{lang_code}/market/product/stock/quote/{symbol}/documents"
+    url = f"https://www.set.or.th/{lang_code}/market/product/stock/quote/{symbol}/company-profile/information"
 
     try:
         await page.goto(url, wait_until="networkidle", timeout=60000)
-        await page.wait_for_timeout(4000)
+        await page.wait_for_timeout(6000)
 
         pdf_link = None
 
@@ -202,11 +202,11 @@ async def download_set_annual_report(page, symbol: str, out_dir: Path, lang: str
     Returns (success, filename, note)
     """
     lang_code = "th" if lang == "th" else "en"
-    url = f"https://www.set.or.th/{lang_code}/market/product/stock/quote/{symbol}/company-snapshot/profile"
+    url = f"https://www.set.or.th/{lang_code}/market/product/stock/quote/{symbol}/company-profile/information"
 
     try:
         await page.goto(url, wait_until="networkidle", timeout=60000)
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(6000)
 
         pdf_link = None
 
