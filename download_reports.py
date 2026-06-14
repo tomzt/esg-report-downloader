@@ -129,6 +129,8 @@ async def download_sec_one_report(page, symbol: str, out_dir: Path, lang: str = 
     lang_code = "th" if lang == "th" else "en"
     url = f"https://www.set.or.th/{lang_code}/market/product/stock/quote/{symbol}/company-profile/information"
 
+    captured_urls = []
+    page.on("response", lambda r: captured_urls.append(r.url) if "json" in r.headers.get("content-type","") else None)
     try:
         await page.goto(url, wait_until="networkidle", timeout=60000)
         await page.wait_for_timeout(6000)
@@ -175,7 +177,7 @@ async def download_sec_one_report(page, symbol: str, out_dir: Path, lang: str = 
             body_text = await page.inner_text("body")
             has56 = "56-1" in body_text or "56" in body_text
             url_now = page.url
-            return False, "", f"No 56-1 link (links={total_links},pdfs={pdf_links},has56={has56},url={url_now[-40:]})"
+            return False, "", f"No 56-1 link (apis={captured_urls})"
 
         if not pdf_link.startswith("http"):
             pdf_link = "https://www.set.or.th" + pdf_link
@@ -209,6 +211,8 @@ async def download_set_annual_report(page, symbol: str, out_dir: Path, lang: str
     lang_code = "th" if lang == "th" else "en"
     url = f"https://www.set.or.th/{lang_code}/market/product/stock/quote/{symbol}/company-profile/information"
 
+    captured_urls = []
+    page.on("response", lambda r: captured_urls.append(r.url) if "json" in r.headers.get("content-type","") else None)
     try:
         await page.goto(url, wait_until="networkidle", timeout=60000)
         await page.wait_for_timeout(6000)
@@ -244,7 +248,7 @@ async def download_set_annual_report(page, symbol: str, out_dir: Path, lang: str
             body_text = await page.inner_text("body")
             hasAnn = "Annual Report" in body_text or "" in body_text
             url_now = page.url
-            return False, "", f"No annual link (links={total_links},pdfs={pdf_links},hasAnn={hasAnn},url={url_now[-40:]})"
+            return False, "", f"No annual link (apis={captured_urls})"
 
         if not pdf_link.startswith("http"):
             pdf_link = "https://www.set.or.th" + pdf_link
