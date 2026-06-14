@@ -1,59 +1,41 @@
 """
-ESG Report Downloader v2 â Fixed version
-Fixes:
-  1. SEC IDISC maintenance detection â skip immediately instead of 60s timeout
-  2. SET Annual Report: try /news-and-publications/annual-report URL first,
-     use domcontentloaded + JavaScript evaluation for PDF links
-  3. Explicit upload error logging (was silent before)
-  4. Minimum file size check before upload (reject 0-byte / HTML responses)
-  5. Use asyncio.Semaphore properly with gather
+download_reports.py
+-------------------
+Download 56-1 One Report (SET documents page) and Annual Report (SET) for 264 ESG companies.
+Runs on GitHub Actions → uploads PDFs to Google Drive.
+
+Requirements: playwright, openpyxl, google-api-python-client, google-auth
 """
 
 import asyncio
 import csv
+import json
 import os
-import shutil
 import sys
+import time
 from pathlib import Path
 
 import openpyxl
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-import json
-
-# ââ Config âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-XLSX_PATH = "companies.xlsx"
-LOG_FILE  = "download_log.csv"
-TMP_DIR   = Path("tmp_downloads")
-GDRIVE_ROOT_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "")
-BATCH_START = int(os.environ.get("BATCH_START", 0))
-BATCH_END   = int(os.environ.get("BATCH_END", 264))
-CONCURRENCY = int(os.environ.get("CONCURRENCY", 3))
-
-# SEC maintenance indicators
-SEC_MAINTENANCE_HOSTS = ["secdocumentstorage", "maintenance", "under construction"]
-SEC_MAINTENANCE_TEXT  = [
-    "à¸à¸£à¸±à¸à¸à¸£à¸¸à¸à¸£à¸°à¸à¸", "à¸à¸´à¸à¸à¸£à¸±à¸à¸à¸£à¸¸à¸", "under maintenance",
-    "temporarily unavailable", "secdocumentstorage"
-]
-
-# ââ Google Drive helpers ââââââââââââââââââââââââââââââââââââââââââââââââââââ
-
+# ── Google Drive upload ──────────────────────────────────────────────────────
 def get_drive_service():
-    cred_json = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON", "")
-    if not cred_json:
-        raise RuntimeError("GDRIVE_SERVICE_ACCOUNT_JSON not set")
-    info = json.loads(cred_json)
+    from google.oauth2.service_account import Credentials
+    from googleapiclient.discovery import build
+
+    creds_json = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON")
+    if not creds_json:
+        raise RuntimeError("GDRIVE_SERVICE_ACCOUNT_JSON secret not set")
+
+    info = json.loads(creds_json)
     creds = Credentials.from_service_account_info(
         info, scopes=["https://www.googleapis.com/auth/drive"]
     )
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
+    return build("drive", "v3", credentials=creds)
 
 
-def get_or_create_folder(service, name: str, parent_id: str) -> str:
+def get_or_create_folder(service, name, parent_id):
+    """Return folder ID, creating it if needed."""
     q = (
         f"name='{name}' and mimeType='application/vnd.google-apps.folder'"
         f" and '{parent_id}' in parents and trashed=false"
@@ -71,346 +53,299 @@ def get_or_create_folder(service, name: str, parent_id: str) -> str:
     return folder["id"]
 
 
-def upload_to_drive(service, local_path: str, filename: str, folder_id: str):
+def upload_to_drive(service, local_path, filename, folder_id):
+    from googleapiclient.http import MediaFileUpload
+
+    # resumable=False avoids GCS backend permission issues with service accounts
     media = MediaFileUpload(local_path, resumable=False)
-    meta  = {"name": filename, "parents": [folder_id]}
+    meta = {"name": filename, "parents": [folder_id]}
     service.files().create(body=meta, media_body=media, fields="id").execute()
-    print(f"  â Uploaded {filename} to Drive")
+    print(f"  ✓ Uploaded {filename} to Drive")
 
 
-# ââ Checkpoint helpers ââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Checkpoint helpers ────────────────────────────────────────────────────────
+LOG_FILE = "download_log.csv"
+LOG_FIELDS = ["symbol", "doc_type", "language", "status", "filename", "note"]
+
 
 def load_done() -> set:
+    """Return set of (symbol, doc_type, language) already done."""
     done = set()
-    if not Path(LOG_FILE).exists():
-        return done
-    with open(LOG_FILE, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            if row.get("status") == "success":
-                done.add((row["symbol"], row["doc_type"], row["language"]))
+    if Path(LOG_FILE).exists():
+        with open(LOG_FILE, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if row["status"] == "success":
+                    done.add((row["symbol"], row["doc_type"], row["language"]))
     return done
 
 
-def log_result(symbol: str, doc_type: str, language: str,
-               status: str, filename: str = "", note: str = ""):
-    file_exists = Path(LOG_FILE).exists()
+def log_result(symbol, doc_type, language, status, filename="", note=""):
+    write_header = not Path(LOG_FILE).exists()
     with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f, fieldnames=["symbol", "doc_type", "language", "status", "filename", "note"]
+        w = csv.DictWriter(f, fieldnames=LOG_FIELDS)
+        if write_header:
+            w.writeheader()
+        w.writerow(
+            {
+                "symbol": symbol,
+                "doc_type": doc_type,
+                "language": language,
+                "status": status,
+                "filename": filename,
+                "note": note,
+            }
         )
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow({
-            "symbol": symbol, "doc_type": doc_type, "language": language,
-            "status": status, "filename": filename, "note": note,
-        })
 
 
-# ââ Excel reader ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-
+# ── Read Excel ────────────────────────────────────────────────────────────────
 def read_companies(xlsx_path: str) -> list[dict]:
     wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
     ws = wb.active
-    rows = list(ws.iter_rows(values_only=True))
-    header = [str(c).strip() if c else "" for c in rows[0]]
     companies = []
-    for i, row in enumerate(rows[1:], start=1):
-        d = dict(zip(header, row))
-        symbol = str(d.get("Symbol", d.get("symbol", ""))).strip()
-        if symbol and symbol != "None":
-            companies.append({
-                "order":     i,
-                "symbol":    symbol,
-                "name_en":   str(d.get("Name (EN)", d.get("name_en", ""))).strip(),
-                "name_th":   str(d.get("Name (TH)", d.get("name_th", ""))).strip(),
-                "industry":  str(d.get("Industry", d.get("industry", ""))).strip(),
-                "rating":    str(d.get("ESG Rating", d.get("rating", ""))).strip(),
-            })
-    wb.close()
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row[1]:
+            continue
+        companies.append(
+            {
+                "order": row[0],
+                "symbol": str(row[1]).strip(),
+                "name_en": str(row[2]).strip() if row[2] else "",
+                "name_th": str(row[3]).strip() if row[3] else "",
+                "industry": str(row[4]).strip() if row[4] else "",
+                "rating": str(row[5]).strip() if row[5] else "",
+            }
+        )
     return companies
 
 
-# ââ SEC 56-1 One Report downloader âââââââââââââââââââââââââââââââââââââââââ
-
-async def download_sec_one_report(
-    page, symbol: str, out_dir: Path, lang: str = "th"
-) -> tuple[bool, str, str]:
-    lang_path = "th" if lang == "th" else "en"
-    url = f"https://market.sec.or.th/public/idisc/{lang_path}/Idiscreport/56-1oneReport"
-
-    try:
-        # Use domcontentloaded so we can detect maintenance redirect fast
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-    except PWTimeout:
-        return False, "", "Timeout on goto SEC"
-    except Exception as e:
-        return False, "", f"goto error: {e}"
-
-    # ââ Maintenance detection ââ
-    current_url = page.url
-    if any(s in current_url for s in SEC_MAINTENANCE_HOSTS):
-        print(f"  â  SEC MAINTENANCE detected for {symbol} ({lang}) â skipping")
-        return False, "", "SEC_MAINTENANCE"
+# ── SET: Download 56-1 One Report from SET documents page ────────────────────
+async def download_sec_one_report(page, symbol: str, out_dir: Path, lang: str = "th") -> tuple[bool, str, str]:
+    """
+    Download 56-1 One Report from SET /documents page.
+    More reliable than SEC IDISC (frequent maintenance).
+    lang: 'th' or 'en'
+    Returns (success, filename, note)
+    """
+    lang_code = "th" if lang == "th" else "en"
+    url = f"https://www.set.or.th/{lang_code}/market/product/stock/quote/{symbol}/documents"
 
     try:
-        content = await page.content()
-    except Exception:
-        content = ""
-    if any(s.lower() in content.lower() for s in SEC_MAINTENANCE_TEXT):
-        print(f"  â  SEC MAINTENANCE (page text) for {symbol} ({lang}) â skipping")
-        return False, "", "SEC_MAINTENANCE"
+        await page.goto(url, wait_until="networkidle", timeout=60000)
+        await page.wait_for_timeout(4000)
 
-    # ââ Search for company ââ
-    try:
-        await page.wait_for_selector('input[placeholder*="à¸à¹à¸à¸«à¸²"], input[type="search"]',
-                                     timeout=20000)
-    except PWTimeout:
-        return False, "", "Search input not found"
-
-    search_box = page.locator(
-        'input[placeholder*="à¸à¹à¸à¸«à¸²"], input[type="search"]'
-    ).first
-    await search_box.fill(symbol)
-    await page.wait_for_timeout(2000)
-
-    # Click first result
-    try:
-        result = page.locator(
-            f'tr:has-text("{symbol}"), li:has-text("{symbol}"), '
-            f'div[class*="result"]:has-text("{symbol}")'
-        ).first
-        await result.wait_for(timeout=10000)
-        await result.click()
-        await page.wait_for_timeout(2000)
-    except Exception:
-        return False, "", f"Company result not found: {symbol}"
-
-    # Find PDF download link
-    try:
-        pdf_link = await page.evaluate("""
-            () => {
-                const links = Array.from(document.querySelectorAll('a'));
-                const pdf = links.find(a =>
-                    a.href && (a.href.endsWith('.pdf') ||
-                               a.href.includes('/download') ||
-                               a.href.includes('/pdf'))
-                );
-                return pdf ? pdf.href : null;
-            }
-        """)
-    except Exception:
         pdf_link = None
 
-    if not pdf_link:
-        return False, "", "No PDF link found on SEC page"
+        # Strategy 1: href or text contains 56-1 / one-report keywords
+        selectors = [
+            'a[href*="56-1"]',
+            'a[href*="56_1"]',
+            'a[href*="one-report" i]',
+            'a[href*="onereport" i]',
+            'a[href*="OneReport"]',
+        ]
+        for sel in selectors:
+            links = page.locator(sel)
+            c = await links.count()
+            if c > 0:
+                for i in range(c):
+                    href = await links.nth(i).get_attribute("href") or ""
+                    text = await links.nth(i).inner_text()
+                    if "2024" in href or "2567" in href or "2024" in text or "2567" in text:
+                        pdf_link = href
+                        break
+                if not pdf_link:
+                    pdf_link = await links.first.get_attribute("href")
+                if pdf_link:
+                    break
 
-    # Download the PDF
-    try:
+        # Strategy 2: any PDF link near "56" text
+        if not pdf_link:
+            all_pdf = page.locator('a[href$=".pdf"], a[href*="/pdf/"]')
+            c = await all_pdf.count()
+            for i in range(c):
+                href = await all_pdf.nth(i).get_attribute("href") or ""
+                text = await all_pdf.nth(i).inner_text()
+                if "56" in href or "56" in text or "one" in href.lower():
+                    pdf_link = href
+                    break
+
+        if not pdf_link:
+            return False, "", "No 56-1 link found on SET documents page"
+
+        if not pdf_link.startswith("http"):
+            pdf_link = "https://www.set.or.th" + pdf_link
+
+        filename = f"{symbol}_56-1_OneReport_2567_{lang.upper()}.pdf"
+        out_path = out_dir / filename
+
         response = await page.request.get(pdf_link)
-        if not response.ok:
-            return False, "", f"HTTP {response.status} for PDF"
-        content_bytes = await response.body()
-        if len(content_bytes) < 1000:
-            return False, "", f"File too small ({len(content_bytes)} bytes) â not a PDF"
-        filename = f"{symbol}_56-1OneReport_2567_{lang.upper()}.pdf"
-        (out_dir / filename).write_bytes(content_bytes)
-        return True, filename, ""
+        if response.ok:
+            content = await response.body()
+            if len(content) < 1000:
+                return False, "", "Downloaded file too small — likely not a real PDF"
+            out_path.write_bytes(content)
+            return True, filename, ""
+        else:
+            return False, "", f"HTTP {response.status}"
+
+    except PWTimeout:
+        return False, "", "Timeout"
     except Exception as e:
-        return False, "", f"Download error: {e}"
+        return False, "", str(e)[:100]
 
 
-# ââ SET Annual Report downloader ââââââââââââââââââââââââââââââââââââââââââââ
-
-async def download_set_annual_report(
-    page, symbol: str, out_dir: Path, lang: str = "th"
-) -> tuple[bool, str, str]:
+# ── SET: Download Annual Report ───────────────────────────────────────────────
+async def download_set_annual_report(page, symbol: str, out_dir: Path, lang: str = "th") -> tuple[bool, str, str]:
+    """
+    Navigate SET company profile and download Annual Report 2024/2567.
+    lang: 'th' or 'en'
+    Returns (success, filename, note)
+    """
     lang_code = "th" if lang == "th" else "en"
+    url = f"https://www.set.or.th/{lang_code}/market/product/stock/quote/{symbol}/company-snapshot/profile"
 
-    # Priority: news-and-publications/annual-report page (dedicated PDF listing)
-    # Fallback: company-snapshot/profile page
-    candidate_urls = [
-        f"https://www.set.or.th/{lang_code}/market/product/stock/quote/{symbol}/news-and-publications/annual-report",
-        f"https://www.set.or.th/{lang_code}/market/product/stock/quote/{symbol}/company-snapshot/profile",
-        f"https://www.set.or.th/th/market/product/stock/quote/{symbol}/news-and-publications/annual-report",
+    try:
+        await page.goto(url, wait_until="networkidle", timeout=60000)
+        await page.wait_for_timeout(3000)
+
+        pdf_link = None
+
+        selectors = [
+            'a[href*="annual-report" i]',
+            'a[href*="annualreport" i]',
+            'a:has-text("Annual Report")',
+            'a:has-text("รายงานประจำปี")',
+            'a[href*=".pdf"][href*="annual" i]',
+        ]
+
+        for sel in selectors:
+            links = page.locator(sel)
+            c = await links.count()
+            if c > 0:
+                for i in range(c):
+                    href = await links.nth(i).get_attribute("href")
+                    text = await links.nth(i).inner_text()
+                    if href and ("2024" in href or "2567" in href or "2024" in text or "2567" in text):
+                        pdf_link = href
+                        break
+                if not pdf_link and c > 0:
+                    pdf_link = await links.first.get_attribute("href")
+                if pdf_link:
+                    break
+
+        if not pdf_link:
+            return False, "", "No annual report link found on SET profile"
+
+        if not pdf_link.startswith("http"):
+            pdf_link = "https://www.set.or.th" + pdf_link
+
+        filename = f"{symbol}_AnnualReport_2567_{lang.upper()}.pdf"
+        out_path = out_dir / filename
+
+        response = await page.request.get(pdf_link)
+        if response.ok:
+            content = await response.body()
+            if len(content) < 1000:
+                return False, "", "Downloaded file too small"
+            out_path.write_bytes(content)
+            return True, filename, ""
+        else:
+            return False, "", f"HTTP {response.status}"
+
+    except PWTimeout:
+        return False, "", "Timeout"
+    except Exception as e:
+        return False, "", str(e)[:100]
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+async def process_company(browser, company: dict, done: set, service, root_folder_id: str, tmp_dir: Path):
+    symbol = company["symbol"]
+    symbol_dir = tmp_dir / symbol
+    symbol_dir.mkdir(exist_ok=True)
+
+    tasks = [
+        ("56-1 One Report", "th", download_sec_one_report),
+        ("56-1 One Report", "en", download_sec_one_report),
+        ("Annual Report",   "th", download_set_annual_report),
+        ("Annual Report",   "en", download_set_annual_report),
     ]
 
-    pdf_url  = None
-    last_err = "No annual report link found"
+    company_folder_id = get_or_create_folder(service, symbol, root_folder_id)
 
-    for url in candidate_urls:
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            await page.wait_for_timeout(2500)   # let JS render
-        except PWTimeout:
-            last_err = f"Timeout: {url}"
-            continue
-        except Exception as e:
-            last_err = f"goto error: {e}"
+    context = await browser.new_context(accept_downloads=True)
+    page = await context.new_page()
+
+    for doc_type, lang, fn in tasks:
+        key = (symbol, doc_type, lang)
+        if key in done:
+            print(f"  [{symbol}] {doc_type} ({lang}) - skipped (already done)")
             continue
 
-        # JavaScript: collect all anchor hrefs that look like Annual Report PDFs
-        try:
-            links = await page.evaluate("""
-                () => {
-                    return Array.from(document.querySelectorAll('a')).map(a => ({
-                        href: a.href || '',
-                        text: (a.textContent || '').trim().slice(0, 120)
-                    })).filter(l =>
-                        l.href.length > 0 && (
-                            l.href.toLowerCase().includes('.pdf') ||
-                            l.href.toLowerCase().includes('annual') ||
-                            l.text.toLowerCase().includes('annual report') ||
-                            l.text.includes('à¸£à¸²à¸¢à¸à¸²à¸à¸à¸£à¸°à¸à¸³à¸à¸µ')
-                        )
-                    );
-                }
-            """)
-        except Exception:
-            links = []
+        print(f"  [{symbol}] Downloading {doc_type} ({lang})...")
+        success, filename, note = await fn(page, symbol, symbol_dir, lang)
 
-        if not links:
-            continue
-
-        # Prefer links that look like direct PDF downloads for recent years
-        year_hints = ["2024", "2567", "2025", "2568", "annual"]
-
-        def score_link(lnk):
-            h = lnk["href"].lower()
-            t = lnk["text"].lower()
-            score = 0
-            if ".pdf" in h:
-                score += 10
-            for y in year_hints:
-                if y in h or y in t:
-                    score += 5
-            if "annual" in h or "annual" in t:
-                score += 3
-            return score
-
-        links_sorted = sorted(links, key=score_link, reverse=True)
-        pdf_url = links_sorted[0]["href"]
-        break
-
-    if not pdf_url:
-        return False, "", last_err
-
-    # Download the PDF
-    try:
-        response = await page.request.get(pdf_url)
-        if not response.ok:
-            return False, "", f"HTTP {response.status} fetching Annual Report PDF"
-        content_bytes = await response.body()
-        if len(content_bytes) < 1000:
-            return False, "", f"Annual Report too small ({len(content_bytes)}B) â likely not a PDF"
-        filename = f"{symbol}_AnnualReport_2567_{lang.upper()}.pdf"
-        (out_dir / filename).write_bytes(content_bytes)
-        return True, filename, ""
-    except Exception as e:
-        return False, "", f"Download error: {e}"
-
-
-# ââ Process one company âââââââââââââââââââââââââââââââââââââââââââââââââââââ
-
-TASKS = [
-    ("56-1 One Report", "th", download_sec_one_report),
-    ("56-1 One Report", "en", download_sec_one_report),
-    ("Annual Report",   "th", download_set_annual_report),
-    ("Annual Report",   "en", download_set_annual_report),
-]
-
-
-async def process_company(
-    browser, company: dict, done: set, service, root_folder_id: str, tmp_dir: Path
-):
-    symbol     = company["symbol"]
-    symbol_dir = tmp_dir / symbol
-    symbol_dir.mkdir(parents=True, exist_ok=True)
-
-    # Create (or find) Drive subfolder for this company
-    try:
-        company_folder_id = get_or_create_folder(service, symbol, root_folder_id)
-    except Exception as e:
-        print(f"[{symbol}] â Could not create Drive folder: {e}")
-        for doc_type, lang, _ in TASKS:
-            log_result(symbol, doc_type, lang, "folder_error", note=str(e)[:100])
-        return
-
-    context = await browser.new_context()
-    page    = await context.new_page()
-
-    try:
-        for doc_type, lang, download_fn in TASKS:
-            key = (symbol, doc_type, lang)
-            if key in done:
-                print(f"[{symbol}] â­ Skip {doc_type} ({lang}) â already done")
-                continue
-
-            print(f"[{symbol}] â {doc_type} ({lang})â¦")
+        if success:
             try:
-                success, filename, note = await download_fn(page, symbol, symbol_dir, lang)
+                upload_to_drive(service, str(symbol_dir / filename), filename, company_folder_id)
+                log_result(symbol, doc_type, lang, "success", filename)
             except Exception as e:
-                success, filename, note = False, "", f"Unexpected: {e}"
+                log_result(symbol, doc_type, lang, "upload_error", filename, str(e)[:100])
+        else:
+            print(f"    ✗ Failed: {note}")
+            log_result(symbol, doc_type, lang, "failed", note=note)
 
-            if success:
-                local_path = symbol_dir / filename
-                # Verify file exists and is not empty
-                if not local_path.exists() or local_path.stat().st_size < 1000:
-                    msg = f"File missing or too small after download"
-                    print(f"[{symbol}] â {doc_type} ({lang}): {msg}")
-                    log_result(symbol, doc_type, lang, "failed", note=msg)
-                    continue
-                try:
-                    upload_to_drive(service, str(local_path), filename, company_folder_id)
-                    log_result(symbol, doc_type, lang, "success", filename)
-                except Exception as e:
-                    err_msg = str(e)[:150]
-                    print(f"[{symbol}] â Upload FAILED for {filename}: {err_msg}")
-                    log_result(symbol, doc_type, lang, "upload_error", filename, err_msg)
-            else:
-                if note != "SEC_MAINTENANCE":
-                    print(f"[{symbol}] â {doc_type} ({lang}): {note}")
-                log_result(symbol, doc_type, lang, "failed", note=note)
-    finally:
-        await context.close()
-        if symbol_dir.exists():
-            shutil.rmtree(symbol_dir, ignore_errors=True)
+        await asyncio.sleep(2)
 
+    await context.close()
 
-# ââ Main ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+    import shutil
+    shutil.rmtree(symbol_dir, ignore_errors=True)
+
 
 async def main():
-    companies = read_companies(XLSX_PATH)
-    batch     = companies[BATCH_START:BATCH_END]
-    done      = load_done()
+    xlsx_path = os.environ.get("EXCEL_PATH", "companies.xlsx")
+    root_folder_id = os.environ.get("GDRIVE_FOLDER_ID", "")
+    batch_start = int(os.environ.get("BATCH_START", "0"))
+    batch_end = int(os.environ.get("BATCH_END", "264"))
+    concurrency = int(os.environ.get("CONCURRENCY", "3"))
 
-    print(f"Companies in batch: {len(batch)} ({BATCH_START}â{BATCH_END})")
-    print(f"Already done (success): {len(done)}")
+    if not root_folder_id:
+        raise RuntimeError("GDRIVE_FOLDER_ID env var not set")
+
+    companies = read_companies(xlsx_path)
+    companies = companies[batch_start:batch_end]
+    done = load_done()
 
     service = get_drive_service()
+    tmp_dir = Path("tmp_downloads")
+    tmp_dir.mkdir(exist_ok=True)
 
-    TMP_DIR.mkdir(exist_ok=True)
-    sem = asyncio.Semaphore(CONCURRENCY)
-
-    async def run_with_sem(browser, company):
-        async with sem:
-            await process_company(browser, company, done, service, GDRIVE_ROOT_FOLDER_ID, TMP_DIR)
+    print(f"Processing {len(companies)} companies (batch {batch_start}-{batch_end})")
+    print(f"Already done: {len(done)} tasks")
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
-        try:
-            await asyncio.gather(*[run_with_sem(browser, c) for c in batch])
-        finally:
-            await browser.close()
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
 
-    # Upload checkpoint log to Drive
+        sem = asyncio.Semaphore(concurrency)
+
+        async def process_with_sem(company):
+            async with sem:
+                await process_company(browser, company, done, service, root_folder_id, tmp_dir)
+
+        await asyncio.gather(*[process_with_sem(c) for c in companies])
+        await browser.close()
+
     if Path(LOG_FILE).exists():
         try:
-            upload_to_drive(service, LOG_FILE, LOG_FILE, GDRIVE_ROOT_FOLDER_ID)
-            print("â Checkpoint log uploaded to Drive")
-        except Exception as e:
-            print(f"â Could not upload log to Drive: {e}")
+            upload_to_drive(service, LOG_FILE, LOG_FILE, root_folder_id)
+        except Exception:
+            pass
 
-    print("Done.")
+    print("\nDone!")
 
 
 if __name__ == "__main__":
