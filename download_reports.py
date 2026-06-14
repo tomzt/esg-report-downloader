@@ -170,7 +170,12 @@ async def download_sec_one_report(page, symbol: str, out_dir: Path, lang: str = 
                     break
 
         if not pdf_link:
-            return False, "", "No 56-1 link found on SET documents page"
+            total_links = await page.locator("a").count()
+            pdf_links = await page.locator("a[href$=\".pdf\"]").count()
+            body_text = await page.inner_text("body")
+            has56 = "56-1" in body_text or "56" in body_text
+            url_now = page.url
+            return False, "", f"No 56-1 link (links={total_links},pdfs={pdf_links},has56={has56},url={url_now[-40:]})"
 
         if not pdf_link.startswith("http"):
             pdf_link = "https://www.set.or.th" + pdf_link
@@ -234,7 +239,12 @@ async def download_set_annual_report(page, symbol: str, out_dir: Path, lang: str
                     break
 
         if not pdf_link:
-            return False, "", "No annual report link found on SET profile"
+            total_links = await page.locator("a").count()
+            pdf_links = await page.locator("a[href$=\".pdf\"]").count()
+            body_text = await page.inner_text("body")
+            hasAnn = "Annual Report" in body_text or "" in body_text
+            url_now = page.url
+            return False, "", f"No annual link (links={total_links},pdfs={pdf_links},hasAnn={hasAnn},url={url_now[-40:]})"
 
         if not pdf_link.startswith("http"):
             pdf_link = "https://www.set.or.th" + pdf_link
