@@ -11,19 +11,13 @@ on:
         description: "Company index end (exclusive)"
         required: false
         default: "264"
-      concurrency:
-        description: "Parallel browsers"
-        required: false
-        default: "3"
   schedule:
     - cron: "0 2 * * *"
 
 jobs:
   download:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 350
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout repo
@@ -48,11 +42,12 @@ jobs:
 
       - name: Run downloader
         env:
-          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          GDRIVE_OAUTH_CLIENT_ID: ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
+          GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
+          GDRIVE_OAUTH_REFRESH_TOKEN: ${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
           BATCH_START: ${{ github.event.inputs.batch_start || '0' }}
           BATCH_END: ${{ github.event.inputs.batch_end || '264' }}
-          CONCURRENCY: ${{ github.event.inputs.concurrency || '3' }}
           EXCEL_PATH: "companies.xlsx"
         run: python download_reports.py
 

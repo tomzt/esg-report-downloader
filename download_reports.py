@@ -16,14 +16,20 @@ import requests
 
 #  Google Drive 
 def get_drive_service():
-    from google.oauth2.service_account import Credentials
+    from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
-    creds_json = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON")
-    if not creds_json:
-        raise RuntimeError("GDRIVE_SERVICE_ACCOUNT_JSON not set")
-    info = json.loads(creds_json)
-    creds = Credentials.from_service_account_info(
-        info, scopes=["https://www.googleapis.com/auth/drive"])
+    refresh_token = os.environ.get("GDRIVE_OAUTH_REFRESH_TOKEN")
+    client_id = os.environ.get("GDRIVE_OAUTH_CLIENT_ID")
+    client_secret = os.environ.get("GDRIVE_OAUTH_CLIENT_SECRET")
+    if not all([refresh_token, client_id, client_secret]):
+        raise RuntimeError("GDRIVE_OAUTH_REFRESH_TOKEN / CLIENT_ID / CLIENT_SECRET not set")
+    creds = Credentials(
+        token=None,
+        refresh_token=refresh_token,
+        client_id=client_id,
+        client_secret=client_secret,
+        token_uri="https://oauth2.googleapis.com/token",
+    )
     return build("drive", "v3", credentials=creds)
 
 
