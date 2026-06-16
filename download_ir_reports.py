@@ -70,10 +70,8 @@ HEADERS = {
 #   source_type "sec_zip" → download SEC ZIP and extract the TH or EN PDF
 #
 # Companies confirmed as having NO FY2024 filing — omitted intentionally:
-#   PRIN EN  : no 2024 English One Report published anywhere
-#   TGE  EN  : SEC shows no FY2024 filing (gap between 2023 and 2025)
-#   THANA TH : no FY2024 One Report filed (SEC confirms only FY2025)
-#   THANA EN : same as above
+#   PRIN EN  : no 2024 English One Report published anywhere (latest is 2023)
+#   THANA EN : no English version; only Thai version exists on their IR site
 #
 # SC TH note: scasset.com is fully JS-rendered; the URL below is the best
 # candidate found via Google index. Verify the document covers FY2024 before
@@ -154,6 +152,15 @@ REPORTS = [
      "https://market.sec.or.th/public/idisc/Download"
      "?FILEID=dat/f56/1759ONE260320252005430254E.zip",
      "sec_zip"),
+    # THANA (Thanasiri Group) — TH missing from SET API; found on IR website
+    ("THANA",  "TH",
+     "https://www.thanasiri.com/wp-content/uploads/2026/04/THANA-56-1-One-Report-2024.pdf",
+     "direct"),
+
+    # TGE (Thachang Green Energy) — EN missing from SET API; found on IR website
+    ("TGE",    "EN",
+     "https://tge.listedcompany.com/misc/onereport/20250331-tge-onereport-2024-en.pdf",
+     "direct"),
 ]
 
 # ──────────────────────────────────────────────────────────────────────────────
