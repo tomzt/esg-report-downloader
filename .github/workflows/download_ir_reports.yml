@@ -1,0 +1,47 @@
+name: Download IR Reports (Supplementary)
+
+on:
+  workflow_dispatch:          # run manually from GitHub Actions UI
+  workflow_run:               # optionally chain after the main downloader
+    workflows: ["Download ESG Reports"]
+    types: [completed]
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            requests \
+            google-auth \
+            google-auth-httplib2 \
+            google-api-python-client
+
+      - name: Download IR reports & upload to Google Drive
+        env:
+          GDRIVE_OAUTH_CLIENT_ID:     ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
+          GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
+          GDRIVE_OAUTH_REFRESH_TOKEN: ${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
+        run: python download_ir_reports.py
+
+      - name: Upload logs as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ir-download-logs
+          path: |
+            download_log.csv
+            esg_report_status.csv
+          if-no-files-found: ignore
